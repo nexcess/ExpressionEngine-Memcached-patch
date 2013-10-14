@@ -1,0 +1,491 @@
+diff --git a/system/codeigniter/system/core/CodeIgniter.php b/system/codeigniter/system/core/CodeIgniter.php
+index 47a0ae6..0fa5d39 100644
+--- a/system/codeigniter/system/core/CodeIgniter.php
++++ b/system/codeigniter/system/core/CodeIgniter.php
+@@ -181,6 +181,8 @@
+  *	Is there a valid cache file?  If so, we're done...
+  * ------------------------------------------------------
+  */
++	require_once(APPPATH.'helpers/memcache_helper'.EXT);
++
+ 	if ($EXT->_call_hook('cache_override') === FALSE)
+ 	{
+ 		if ($OUT->_display_cache($CFG, $URI) == TRUE)
+@@ -359,4 +361,4 @@
+ 
+ 
+ /* End of file CodeIgniter.php */
+-/* Location: ./system/core/CodeIgniter.php */
+\ No newline at end of file
++/* Location: ./system/core/CodeIgniter.php */
+diff --git a/system/codeigniter/system/core/Output.php b/system/codeigniter/system/core/Output.php
+index d935995..5f63394 100644
+--- a/system/codeigniter/system/core/Output.php
++++ b/system/codeigniter/system/core/Output.php
+@@ -360,29 +360,8 @@ class CI_Output {
+ 				$CI->uri->uri_string();
+ 
+ 		$cache_path .= md5($uri);
+-
+-		if ( ! $fp = @fopen($cache_path, FOPEN_WRITE_CREATE_DESTRUCTIVE))
+-		{
+-			log_message('error', "Unable to write cache file: ".$cache_path);
+-			return;
+-		}
+-
+-		$expire = time() + ($this->cache_expiration * 60);
+-
+-		if (flock($fp, LOCK_EX))
+-		{
+-			fwrite($fp, $expire.'TS--->'.$output);
+-			flock($fp, LOCK_UN);
+-		}
+-		else
+-		{
+-			log_message('error', "Unable to secure a file lock for file at: ".$cache_path);
+-			return;
+-		}
+-		fclose($fp);
+-		@chmod($cache_path, FILE_WRITE_MODE);
+-
+-		log_message('debug', "Cache file written: ".$cache_path);
++		
++		return mcache_set($cache_path, $output, $this->cache_expiration * 60);
+ 	}
+ 
+ 	// --------------------------------------------------------------------
+@@ -403,47 +382,16 @@ class CI_Output {
+ 				$URI->uri_string;
+ 
+ 		$filepath = $cache_path.md5($uri);
+-
+-		if ( ! @file_exists($filepath))
++		
++		$cache = mcache_get($filepath);
++		
++		if ( ! $cache)
+ 		{
+ 			return FALSE;
+ 		}
+ 
+-		if ( ! $fp = @fopen($filepath, FOPEN_READ))
+-		{
+-			return FALSE;
+-		}
+-
+-		flock($fp, LOCK_SH);
+-
+-		$cache = '';
+-		if (filesize($filepath) > 0)
+-		{
+-			$cache = fread($fp, filesize($filepath));
+-		}
+-
+-		flock($fp, LOCK_UN);
+-		fclose($fp);
+-
+-		// Strip out the embedded timestamp
+-		if ( ! preg_match("/(\d+TS--->)/", $cache, $match))
+-		{
+-			return FALSE;
+-		}
+-
+-		// Has the file expired? If so we'll delete it.
+-		if (time() >= trim(str_replace('TS--->', '', $match['1'])))
+-		{
+-			if (is_really_writable($cache_path))
+-			{
+-				@unlink($filepath);
+-				log_message('debug', "Cache file has expired. File deleted");
+-				return FALSE;
+-			}
+-		}
+-
+ 		// Display the cache
+-		$this->_display(str_replace($match['0'], '', $cache));
++		$this->_display($cache);
+ 		log_message('debug', "Cache file is current. Sending it to browser.");
+ 		return TRUE;
+ 	}
+@@ -453,4 +401,4 @@ class CI_Output {
+ // END Output Class
+ 
+ /* End of file Output.php */
+-/* Location: ./system/core/Output.php */
+\ No newline at end of file
++/* Location: ./system/core/Output.php */
+diff --git a/system/codeigniter/system/database/DB_cache.php b/system/codeigniter/system/database/DB_cache.php
+index ed8b98a..01c2a82 100644
+--- a/system/codeigniter/system/database/DB_cache.php
++++ b/system/codeigniter/system/database/DB_cache.php
+@@ -100,12 +100,7 @@ class CI_DB_Cache {
+ 
+ 		$filepath = $this->db->cachedir.$segment_one.'+'.$segment_two.'/'.md5($sql);
+ 
+-		if (FALSE === ($cachedata = read_file($filepath)))
+-		{
+-			return FALSE;
+-		}
+-
+-		return unserialize($cachedata);
++		return @unserialize(mcache_get($filepath));
+ 	}
+ 
+ 	// --------------------------------------------------------------------
+@@ -130,24 +125,8 @@ class CI_DB_Cache {
+ 		$dir_path = $this->db->cachedir.$segment_one.'+'.$segment_two.'/';
+ 
+ 		$filename = md5($sql);
+-
+-		if ( ! @is_dir($dir_path))
+-		{
+-			if ( ! @mkdir($dir_path, DIR_WRITE_MODE))
+-			{
+-				return FALSE;
+-			}
+-
+-			@chmod($dir_path, DIR_WRITE_MODE);
+-		}
+-
+-		if (write_file($dir_path.$filename, serialize($object)) === FALSE)
+-		{
+-			return FALSE;
+-		}
+-
+-		@chmod($dir_path.$filename, FILE_WRITE_MODE);
+-		return TRUE;
++		
++		return mcache_set($dir_path.$filename, serialize($object));
+ 	}
+ 
+ 	// --------------------------------------------------------------------
+@@ -160,19 +139,7 @@ class CI_DB_Cache {
+ 	 */
+ 	function delete($segment_one = '', $segment_two = '')
+ 	{
+-		if ($segment_one == '')
+-		{
+-			$segment_one  = ($this->CI->uri->segment(1) == FALSE) ? 'default' : $this->CI->uri->segment(1);
+-		}
+-
+-		if ($segment_two == '')
+-		{
+-			$segment_two = ($this->CI->uri->segment(2) == FALSE) ? 'index' : $this->CI->uri->segment(2);
+-		}
+-
+-		$dir_path = $this->db->cachedir.$segment_one.'+'.$segment_two.'/';
+-
+-		delete_files($dir_path, TRUE);
++		$this->delete_all();
+ 	}
+ 
+ 	// --------------------------------------------------------------------
+@@ -185,11 +152,11 @@ class CI_DB_Cache {
+ 	 */
+ 	function delete_all()
+ 	{
+-		delete_files($this->db->cachedir, TRUE);
++		return mcache_flush_all();
+ 	}
+ 
+ }
+ 
+ 
+ /* End of file DB_cache.php */
+-/* Location: ./system/database/DB_cache.php */
+\ No newline at end of file
++/* Location: ./system/database/DB_cache.php */
+diff --git a/system/expressionengine/helpers/memcache_helper.php b/system/expressionengine/helpers/memcache_helper.php
+new file mode 100644
+index 0000000..861935f
+--- /dev/null
++++ b/system/expressionengine/helpers/memcache_helper.php
+@@ -0,0 +1,75 @@
++<?php  if ( ! defined('BASEPATH')) exit('No direct script access allowed');
++
++if ( ! defined('_MEMCACHE_HELPER_LOADED'))
++{
++    $MCACHE = null;
++
++    function &get_mcache()
++    {
++        global $MCACHE;
++        if (is_null($MCACHE))
++        {
++            global $CFG;
++            $MCACHE = new Memcache;
++            // if this was just an array it breaks the EE admin interface, so
++            // we use a comma-separated list
++            $servers = array_filter(explode(',',$CFG->item('memcache_servers')),'trim');
++            if (is_array($servers))
++            {
++                foreach($servers as $server)
++                {
++                    if (strpos($server, 'unix://') === 0)
++                    {
++                        $MCACHE->addServer($server, 0);
++                    }
++                    else
++                    {
++                        list($host, $port) = explode(':', $server, 2);
++                        $MCACHE->addServer($host, (int)$port);
++                    }
++                }
++            }
++            else
++            {
++                $MCACHE->addServer('localhost', 11211);
++            }
++        }
++        return $MCACHE;
++    }
++
++    function mcache_generate_key($raw_key)
++    {
++        global $CFG;
++        $key_salt = $CFG->item('memcache_salt');
++        $mangled_key = sha1(sprintf('%s:%s', $key_salt, $raw_key));
++        return $mangled_key;
++    }
++
++    function mcache_get($key)
++    {
++        return get_mcache()->get(mcache_generate_key($key));
++    }
++
++    function mcache_set($key, $value, $ttl=0)
++    {
++        $mangled_key = mcache_generate_key($key);
++        $cache =& get_mcache();
++        if ( ! $cache->replace($mangled_key, $value, 0, $ttl))
++        {
++            return $cache->set($mangled_key, $value, 0, $ttl);
++        }
++        return TRUE;
++    }
++
++    function mcache_flush($key)
++    {
++        return get_mcache()->delete($key);
++    }
++
++    function mcache_flush_all()
++    {
++        return get_mcache()->flush();
++    }
++
++    define('_MEMCACHE_HELPER_LOADED', true);
++}
+diff --git a/system/expressionengine/helpers/version_helper.php b/system/expressionengine/helpers/version_helper.php
+index 8f710c5..9f204f5 100644
+--- a/system/expressionengine/helpers/version_helper.php
++++ b/system/expressionengine/helpers/version_helper.php
+@@ -189,7 +189,7 @@
+ 		
+ 		// check cache first
+ 		$cache_expire = 60 * 60 * 24;	// only do this once per day
+-		$contents = read_file(APPPATH.'cache/ee_version/current_version');
++		$contents = mcache_get(APPPATH.'cache/ee_version/current_version');
+ 
+ 		if ($contents !== FALSE)
+ 		{
+@@ -239,10 +239,8 @@
+ 				'data' 		=> $details
+ 			);
+ 
+-		if (write_file($cache_path.'current_version', serialize($data)))
+-		{
+-			@chmod($cache_path.'current_version', FILE_WRITE_MODE);			
+-		}		
++		$cache_expire = 60 * 60 * 24;	// only do this once per day
++		mcache_set($cache_path.'current_version', serialize($data), $cache_expire);
+ 	}
+ 
+ 
+diff --git a/system/expressionengine/libraries/Functions.php b/system/expressionengine/libraries/Functions.php
+index 0793071..42ec228 100644
+--- a/system/expressionengine/libraries/Functions.php
++++ b/system/expressionengine/libraries/Functions.php
+@@ -1105,22 +1105,20 @@ class EE_Functions {
+ 
+ 		switch ($which)
+ 		{
+-			case 'page' : $this->delete_directory(APPPATH.'cache/page_cache'.$sub_dir);
++			case 'page' :
++			case 'db'	:
++			case 'tag'  :
++			case 'sql'  :
++				mcache_flush_all();
+ 				break;
+-			case 'db'	: $this->delete_directory(APPPATH.'cache/db_cache_'.ee()->config->item('site_id').$db_path);
+-				break;
+-			case 'tag'  : $this->delete_directory(APPPATH.'cache/tag_cache'.$sub_dir);
+-				break;
+-			case 'sql'  : $this->delete_directory(APPPATH.'cache/sql_cache'.$sub_dir);
++			case 'relationships' : $this->EE->db->query("UPDATE exp_relationships SET rel_data = '', reverse_rel_data = ''");
+ 				break;
+ 			case 'all'  :
+-						$this->delete_directory(APPPATH.'cache/page_cache'.$sub_dir);
+-						$this->delete_directory(APPPATH.'cache/db_cache_'.ee()->config->item('site_id').$db_path);
+-						$this->delete_directory(APPPATH.'cache/sql_cache'.$sub_dir);
++						mcache_flush_all();
+ 
+-						if (ee()->config->item('disable_tag_caching') != 'y')
++						if ($relationships === TRUE)
+ 						{
+-							$this->delete_directory(APPPATH.'cache/tag_cache'.$sub_dir);
++							$this->EE->db->query("UPDATE exp_relationships SET rel_data = '', reverse_rel_data = ''");
+ 						}
+ 				break;
+ 		}
+diff --git a/system/expressionengine/libraries/Template.php b/system/expressionengine/libraries/Template.php
+index e193291..b5b1863 100644
+--- a/system/expressionengine/libraries/Template.php
++++ b/system/expressionengine/libraries/Template.php
+@@ -1618,41 +1618,15 @@ class EE_Template {
+ 		$cache_dir = ($cache_type == 'tag') ? APPPATH.'cache/'.$this->t_cache_path : $cache_dir = APPPATH.'cache/'.$this->p_cache_path;
+ 		$file = $cache_dir.$cfile;
+ 
+-		if ( ! file_exists($file) OR ! ($fp = @fopen($file, FOPEN_READ)))
++		$cache = mcache_get($file);
++		if ( $cache)
+ 		{
+-			$status = 'EXPIRED';
+-			return FALSE;
+-		}
+-
+-		$cache = '';
+-		$refresh = ( ! isset($args['refresh'])) ? 0 : $args['refresh'];
+-
+-		flock($fp, LOCK_SH);
+-
+-		// Read the first line (left a small buffer - just in case)
+-		$timestamp	= trim(fgets($fp, 30));
+-
+-		if ((strlen($timestamp) != 10) OR ($timestamp !== ((string)(int) $timestamp))) // Integer check
+-		{
+-			// Should never happen - so we'll log it
+-			$this->log_item("Invalid Cache File Format: ".$file);
+-			$status = 'EXPIRED';
+-		}
+-		elseif (time() > ($timestamp + ($refresh * 60)))
+-		{
+-			$status = 'EXPIRED';
++			$status = 'CURRENT';
+ 		}
+ 		else
+ 		{
+-			// Timestamp valid - read rest of file
+-			$this->cache_timestamp = (int) $timestamp;
+-			$status = 'CURRENT';
+-			$cache = @fread($fp, filesize($file));
++			$status = 'EXPIRED';
+ 		}
+-
+-		flock($fp, LOCK_UN);
+-		fclose($fp);
+-
+ 		return $cache;
+ 	}
+ 
+@@ -1697,41 +1671,7 @@ class EE_Template {
+ 
+ 		$cache_file = $cache_dir.$cfile;
+ 
+-		$dirs = array($cache_base, $cache_dir);
+-
+-		foreach ($dirs as $dir)
+-		{
+-			if ( ! @is_dir($dir))
+-			{
+-				if ( ! @mkdir($dir, DIR_WRITE_MODE))
+-				{
+-					return;
+-				}
+-
+-				if ($dir == $cache_base && $fp = @fopen($dir.'/index.html', FOPEN_WRITE_CREATE_DESTRUCTIVE))
+-				{
+-					fclose($fp);
+-				}
+-
+-				@chmod($dir, DIR_WRITE_MODE);
+-			}
+-		}
+-
+-		if ( ! $fp = @fopen($cache_file, FOPEN_WRITE_CREATE_DESTRUCTIVE))
+-		{
+-			$this->log_item("Could not create/write to cache file: ".$cache_file);
+-			return;
+-		}
+-
+-		flock($fp, LOCK_EX);
+-		if (fwrite($fp, time()."\n".$data) === FALSE)
+-		{
+-			$this->log_item("Could not write to cache file: ".$cache_file);
+-		}
+-		flock($fp, LOCK_UN);
+-		fclose($fp);
+-
+-		@chmod($cache_file, FILE_WRITE_MODE);
++		return mcache_set($cache_file, $data);
+ 	}
+ 
+ 	// --------------------------------------------------------------------
+diff --git a/system/expressionengine/modules/channel/mod.channel.php b/system/expressionengine/modules/channel/mod.channel.php
+index e8fb903..9e7ec34 100644
+--- a/system/expressionengine/modules/channel/mod.channel.php
++++ b/system/expressionengine/modules/channel/mod.channel.php
+@@ -149,17 +149,7 @@ class Channel {
+ 
+ 		$cache_file = APPPATH.'cache/'.$this->sql_cache_dir.md5($tag.$this->uri);
+ 
+-		if ( ! $fp = @fopen($cache_file, FOPEN_READ))
+-		{
+-			return FALSE;
+-		}
+-
+-		flock($fp, LOCK_SH);
+-		$sql = @fread($fp, filesize($cache_file));
+-		flock($fp, LOCK_UN);
+-		fclose($fp);
+-
+-		return $sql;
++		return mcache_get($cache_file);
+ 	}
+ 
+ 	// ------------------------------------------------------------------------
+@@ -174,33 +164,7 @@ class Channel {
+ 		$cache_dir  = APPPATH.'cache/'.$this->sql_cache_dir;
+ 		$cache_file = $cache_dir.md5($tag.$this->uri);
+ 
+-		if ( ! @is_dir($cache_dir))
+-		{
+-			if ( ! @mkdir($cache_dir, DIR_WRITE_MODE))
+-			{
+-				return FALSE;
+-			}
+-
+-			if ($fp = @fopen($cache_dir.'/index.html', FOPEN_WRITE_CREATE_DESTRUCTIVE))
+-			{
+-				fclose($fp);
+-			}
+-
+-			@chmod($cache_dir, DIR_WRITE_MODE);
+-		}
+-
+-		if ( ! $fp = @fopen($cache_file, FOPEN_WRITE_CREATE_DESTRUCTIVE))
+-		{
+-			return FALSE;
+-		}
+-
+-		flock($fp, LOCK_EX);
+-		fwrite($fp, $sql);
+-		flock($fp, LOCK_UN);
+-		fclose($fp);
+-		@chmod($cache_file, FILE_WRITE_MODE);
+-
+-		return TRUE;
++		return mcache_set($cache_file, $sql);
+ 	}
+ 
+ 	// ------------------------------------------------------------------------
